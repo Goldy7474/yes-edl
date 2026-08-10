@@ -1,3 +1,4 @@
+import sys
 import socket
 import ipaddress
 
@@ -19,38 +20,62 @@ STATIC_NETWORKS = [
     "31.168.162.179/28"     # הופך אוטומטית ל-31.168.162.176/28 התקין
 ]
 
+OUTPUT_FILE = "yes_ips.txt"
+
 def resolve_domains():
     valid_entries = set()
+
+    # הגדרת Timeout של 5 שניות לכל שאילתת DNS
+    socket.setdefaulttimeout(5)
 
     # 1. עיבוד ונרמול הרשתות הסטטיות
     for net_str in STATIC_NETWORKS:
         try:
             # strict=False מנרמל כתובת Host בתוך סאבנט לכתובת רשת חוקית
             net_obj = ipaddress.ip_network(net_str, strict=False)
-            valid_entries.add(str(net_obj))
+            
+            # סינון רשתות פרטיות או לא תקניות
+            if not (net_obj.is_private or net_obj.is_loopback or net_obj.is_unspecified):
+                valid_entries.add(str(net_obj))
+            else:
+                print(f"[WARN] Ignored private static network: {net_str}")
         except ValueError as e:
-            print(f"Error processing network {net_str}: {e}")
+            print(f"[ERROR] Error processing network {net_str}: {e}")
 
     # 2. תרגום דינמי של הדומיינים ואימות תקינות ה-IP
     for domain in DOMAINS:
         try:
-            results = socket.getaddrinfo(domain, None)
+            results = socket.getaddrinfo(domain, None, socket.AF_INET) # סינון מראש ל-IPv4 בלבד
             for res in results:
                 ip_str = res[4][0]
                 try:
-                    # אימות שהכתובת היא IPv4 תקינה
                     ip_obj = ipaddress.ip_address(ip_str)
+                    
+                    # אימות שהכתובת היא IPv4 פומבית ותקינה
                     if isinstance(ip_obj, ipaddress.IPv4Address):
-                        valid_entries.add(str(ip_obj))
+                        if not (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_unspecified):
+                            valid_entries.add(str(ip_obj))
+                        else:
+                            print(f"[WARN] Ignored private IP for {domain}: {ip_str}")
                 except ValueError:
                     continue
         except Exception as e:
-            print(f"Error resolving {domain}: {e}")
+            print(f"[ERROR] Error resolving {domain}: {e}")
 
-    # 3. שמירה לקובץ
-    with open("yes_ips.txt", "w") as f:
+    # 3. מנגנון Fail-Safe: הגנה מפני קובץ ריק או תוצאה חלקית בגלל תקלת DNS
+    # מצפים לפחות לטווחים הסטטיים + כתובות מהדומיינים
+    min_expected = len(STATIC_NETWORKS) + 1
+    if len(valid_entries) < min_expected:
+        print(f"[CRITICAL] Only {len(valid_entries)} IPs/Networks resolved. Expected at least {min_expected}.")
+        print("[CRITICAL] Aborting file write to protect Palo Alto EDL.")
+        sys.exit(1) # הכשלת ה-Action כדי ש-GitHub לא יבצע Commit לקובץ פגום
+
+    # 4. שמירה נקייה וממויינת לקובץ
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         for entry in sorted(valid_entries):
             f.write(f"{entry}\n")
+            
+    print(f"[SUCCESS] Successfully updated {OUTPUT_FILE} with {len(valid_entries)} entries.")
 
 if __name__ == "__main__":
     resolve_domains()
